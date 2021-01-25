@@ -10,10 +10,49 @@
 // MP4 sample buffer size.
 #define BUF_SIZE 1024<<10
 
+int DEBUG = 0;
+
 struct fp_sensor_data {
-    int32_t type;
-    float x, y, z;
-};
+    int32_t type;  // 1: Accelerometer, 2: Magnetic Field, 4: Gyroscope
+    // x, y, z components are in the right-handed coordinate frame:
+    //   x = right, y = up, z = out of the screen,
+    // when holding the phone in its default orientation.  The axes are not
+    // swapped when the screen orientation changes.
+    float x, y, z;  // acceleration: m/s/s, magnetic field: uT, angular rate: rad/s
+} __attribute__((packed));
+
+struct fp_location_data {
+  double altitude;                     // meters above WGS-84 reference
+                                       //  ellipsoid, 0.0 if location does not
+                                       //  have an altitude
+  float verticalAccuracyMeters;        // vertical accuracy in meters at 68% 
+                                       //  confidence (1 stddev if Gaussian),
+                                       //  0.0 if location does not have
+                                       //  vertical accuracy
+  float bearing;                       // degrees in the horizontal direction
+                                       //  of travel of the device, (0.0, 360.0]
+                                       //  if the device has a bearing, 0.0 if 
+                                       //  location does not have a bearing
+  float bearingAccuracyDegrees;        // bearing accuracy at 68% confidence
+                                       //  (1 stddev if Gaussian), 0.0 if
+                                       //  location does not have a bearing
+                                       //  accuracy
+  double latitude;                     // degrees
+  double longitude;                    // degrees
+  float accuracy;                      // radial horizontal accuracy in meters
+                                       //  at 68% confidence (1 stddev if
+                                       //  Gaussian), 0.0 if location does not
+                                       //  have a horizontal accuracy
+  float speed;                         // meters per second over ground
+                                       //  (horizontal), 0.0 if location does
+                                       //  not have speed
+  float speedAccuracyMetersPerSecond;  // speed accuracy at 68% confidence
+                                       //  (1 stddev if Gaussian), 0.0 if location
+                                       //  does not have speed accuracy
+  long time;                           // UTC time of this fix, in milliseconds
+                                       //  since January 1, 1970
+                                       //  NOTE: not necessarily monotonic!
+} __attribute__((packed));
 
 
 static int extract_track(char *mp4_filename, int track, char *csv_filename) {
@@ -81,7 +120,6 @@ static int extract_track(char *mp4_filename, int track, char *csv_filename) {
     // Get the samples and process them.
     uint8_t metadata_buffer[BUF_SIZE];
     uint8_t sample_buffer[BUF_SIZE];
-    uint8_t flipped_sample_buffer[BUF_SIZE];
     struct mp4_track_sample sample;
     int sample_count = 0;
     do {
@@ -92,32 +130,40 @@ static int extract_track(char *mp4_filename, int track, char *csv_filename) {
             fprintf(stderr, "Error getting track sample\n");
             continue;
         }
-        fprintf(stderr, "sample.size %d, sample time %g  ", sample.size,
-                       mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0);
-        for (int k = 0; k < sample.size; ++k) {
-          fprintf(stderr, "%x ", sample_buffer[k]);
+        if (DEBUG) {
+            fprintf(stderr, "sample.size %d, sample time %g  ", sample.size,
+                    mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0);
+            for (int k = 0; k < sample.size; ++k) {
+                fprintf(stderr, "%x ", sample_buffer[k]);
+            }
+            fprintf(stderr, "\n");
         }
-        fprintf(stderr, "\n");
-        if (sample.size % 16 != 0) {
-            fprintf(stderr, "Error: sample size isn't a multiple of 16\n");
-            continue;
+        if (track == 0) {  // FP Metadata Sample
+          // FP Metadata is just strings, treat them with some caution by null
+          // terminating at sample.size
+          sample_buffer[sample.size] = 0;
+          fprintf(csv_file, "%g, %s\n",
+                  mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0,
+                  sample_buffer);
+          continue;
         }
-        // Flip to little endian (ugh).
-        for (uint8_t k = 0; k < sample.size; k += 4) {
-            flipped_sample_buffer[k] = sample_buffer[k + 3];
-            flipped_sample_buffer[k + 1] = sample_buffer[k + 2];
-            flipped_sample_buffer[k + 2] = sample_buffer[k + 1];
-            flipped_sample_buffer[k + 3] = sample_buffer[k];
-        }
-        for (uint8_t k = 0; k < sample.size; k += 16) {
-            struct fp_sensor_data *fp_sensor_data_p =
-              (struct fp_sensor_data*)&flipped_sample_buffer[k];
-            fprintf(csv_file, "%g, %d, %g, %g, %g\n",
-                    mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0,
-                    fp_sensor_data_p->type,
-                    fp_sensor_data_p->x,
-                    fp_sensor_data_p->y,
-                    fp_sensor_data_p->z);
+        if (sample.size == 56) {  // FP Location Sample
+          struct fp_location_data *p = 
+            (struct fp_location_data*)&sample_buffer;
+          fprintf(csv_file, "%g, %g, %g, %g, %g, %g, %g, %g, %g, %g, %ld\n",
+                  mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0,
+                  p->altitude, p->verticalAccuracyMeters, p->bearing,
+                  p->bearingAccuracyDegrees, p->latitude, p->longitude,
+                  p->accuracy, p->speed, p->speedAccuracyMetersPerSecond,
+                  p->time);
+        } else {  // FP Sensor Samples come in multiples of 16 bytes
+            for (uint8_t k = 0; k < sample.size; k += 16) {
+                struct fp_sensor_data *p =
+                  (struct fp_sensor_data*)&sample_buffer[k];
+                fprintf(csv_file, "%g, %d, %g, %g, %g\n",
+                        mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0,
+                        p->type, p->x, p->y, p->z);
+            }
         }
     } while (sample.size);
 
