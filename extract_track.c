@@ -92,31 +92,32 @@ static int extract_track(char *mp4_filename, int track, char *csv_filename) {
             fprintf(stderr, "Error getting track sample\n");
             continue;
         }
-//        fprintf(stderr, "sample.size %d, sample time %g\n", sample.size,
-//                       mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0);
-//        for (k = 0; k < sample.size; ++k) {
-//          fprintf(stderr, "%x ", sample_buffer[k]);
-//        }
-//        fprintf(stderr, "\n");
-        if (sample.size == 16) {
-            // Flip to little endian (ugh).
-            for (uint8_t k = 0; k < sample.size; k += 4) {
-                flipped_sample_buffer[k] = sample_buffer[k + 3];
-                flipped_sample_buffer[k + 1] = sample_buffer[k + 2];
-                flipped_sample_buffer[k + 2] = sample_buffer[k + 1];
-                flipped_sample_buffer[k + 3] = sample_buffer[k];
-            }
+        fprintf(stderr, "sample.size %d, sample time %g  ", sample.size,
+                       mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0);
+        for (int k = 0; k < sample.size; ++k) {
+          fprintf(stderr, "%x ", sample_buffer[k]);
+        }
+        fprintf(stderr, "\n");
+        if (sample.size % 16 != 0) {
+            fprintf(stderr, "Error: sample size isn't a multiple of 16\n");
+            continue;
+        }
+        // Flip to little endian (ugh).
+        for (uint8_t k = 0; k < sample.size; k += 4) {
+            flipped_sample_buffer[k] = sample_buffer[k + 3];
+            flipped_sample_buffer[k + 1] = sample_buffer[k + 2];
+            flipped_sample_buffer[k + 2] = sample_buffer[k + 1];
+            flipped_sample_buffer[k + 3] = sample_buffer[k];
+        }
+        for (uint8_t k = 0; k < sample.size; k += 16) {
             struct fp_sensor_data *fp_sensor_data_p =
-              (struct fp_sensor_data*)&flipped_sample_buffer;
+              (struct fp_sensor_data*)&flipped_sample_buffer[k];
             fprintf(csv_file, "%g, %d, %g, %g, %g\n",
                     mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0,
                     fp_sensor_data_p->type,
                     fp_sensor_data_p->x,
                     fp_sensor_data_p->y,
                     fp_sensor_data_p->z);
-        } else {
-            fprintf(csv_file, "%g\n",
-                    mp4_sample_time_to_usec(sample.dts, tk.timescale) / 1000000.0);
         }
     } while (sample.size);
 
