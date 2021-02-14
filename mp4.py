@@ -162,6 +162,7 @@ def listSubBoxes(f, boxes, boxType, index = 0):
 # Specialized functions to read sample table data: struct can't handle variable-length.
 
 def readStscBox(f, offset):
+  # Sample to block (or chunk) table
   f.seek(offset)
   header = readBoxHeader(f)
   assert(header.type == b'stsc')
@@ -176,6 +177,7 @@ def readStscBox(f, offset):
   return spb
 
 def readStszBox(f, offset):
+  # Sample size table
   f.seek(offset)
   header = readBoxHeader(f)
   assert(header.type == b'stsz')
@@ -189,7 +191,22 @@ def readStszBox(f, offset):
     ss.append(sampleSize)
   return ss
 
+def readSttsBox(f, offset):
+  # Sample duration table
+  f.seek(offset)
+  header = readBoxHeader(f)
+  assert(header.type == b'stts')
+  f.read(4)  # skip version/flags
+  numberOfEntries = int.from_bytes(f.read(4), 'big')
+  st = []
+  for i in range(numberOfEntries):
+    count = int.from_bytes(f.read(4), 'big')
+    duration = int.from_bytes(f.read(4), 'big')
+    st.append((count, duration))
+  return st
+
 def readCo64Box(f, offset):
+  # Block (or chunk) offset table
   f.seek(offset)
   header = readBoxHeader(f)
   assert(header.type == b'co64')
@@ -229,15 +246,23 @@ def processSamples(f, index, callback):
   #print('STSC', blockToSamplesTable)
   sampleSizes = readStszBox(f, stblSubBoxes[b'stsz'][0]) 
   #print('STSZ', sampleSizes)
+  sampleDurations = readSttsBox(f, stblSubBoxes[b'stts'][0]) 
+  #print('STTS', sampleDurations)
   blockOffsets = readCo64Box(f, stblSubBoxes[b'co64'][0]) 
   #print('CO64', blockOffsets)
 
   tableCounter = 0
   blockInTableCounter = 0
   sampleInBlockCounter = 0
+  sampleInDurationCounter = 0
+  durationCounter = 0
   blockCounter = 0
   f.seek(blockOffsets[blockCounter])
+  time = 0
   for sampleCounter in range(len(sampleSizes)):
+    if sampleInDurationCounter >= sampleDurations[durationCounter][0]:
+      durationCounter += 1
+      sampleInDurationCounter = 0
     if sampleInBlockCounter >= blockToSamplesTable[tableCounter][1]:
       blockCounter += 1
       sampleInBlockCounter = 0
@@ -245,8 +270,10 @@ def processSamples(f, index, callback):
         tableCounter += 1
       f.seek(blockOffsets[blockCounter])
     sample = f.read(sampleSizes[sampleCounter])
-    callback(sample)
+    callback(time, sample)
     sampleInBlockCounter += 1
+    sampleInDurationCounter += 1
+    time += sampleDurations[durationCounter][1]
 
 
 # Tests
