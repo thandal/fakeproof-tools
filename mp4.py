@@ -1,8 +1,12 @@
-import os, sys
-import struct
+#!/usr/bin/python3
+# Execute as a script for basic tests.
+import os, struct, sys
 from collections import namedtuple
 
 
+################################################################################
+# MP4 data structures 
+################################################################################
 # For MP4 file format, see https://xhelmboyx.tripod.com/formats/mp4-layout.txt
 
 # Base MP4 box
@@ -107,7 +111,6 @@ def readBoxHeader(f):
   if data == b'': return None
   length, type = boxHeaderStruct.unpack(data)
   if length == 1:  # Special length trick
-    print('Read long length for', type)
     length = int.from_bytes(f.read(8), 'big')
   header = boxHeaderNamedTuple._make((length, type))
   return header
@@ -129,8 +132,8 @@ def readBoxOfType(f, boxType):
   fields = boxTypeStruct.unpack(data)
   return boxTypeNamedTuple._make(fields)
 
-def readSubBox(f, boxes, boxType):
-  f.seek(boxes[boxType])
+def readSubBox(f, boxes, boxType, index = 0):
+  f.seek(boxes[boxType][index])
   box = readBoxOfType(f, boxType)
   return box
 
@@ -144,119 +147,42 @@ def listBoxes(f, start_offset = 0, end_offset = sys.maxsize):
     f.seek(offset)
     header = readBoxHeader(f)
     if header is None: break
-    boxes[header.type] = offset
+    boxes.setdefault(header.type, []).append(offset)
     offset += header.length
     if (offset >= end_offset): break
   return boxes
 
-def listSubBoxes(f, boxes, boxType):
-  offset = boxes[boxType]
+def listSubBoxes(f, boxes, boxType, index = 0):
+  offset = boxes[boxType][index]
   f.seek(offset)
   header = readBoxHeader(f)
   assert(header.type == boxType)
   return listBoxes(f, f.tell(), offset + header.length)
 
-
-################################################################################
-# High-level functions
-################################################################################
-
-def listTracks(f):
-  boxes = listBoxes(f)
-  assert(b'ftyp' in boxes)
-  T = {}
-  moovBoxes = listSubBoxes(f, boxes, b'moov')
-  # Note: moov has a copy of the last trak -- handy for knowing how many to
-  # expect! (But we don't use it fow now).
-  workingBoxes = listSubBoxes(f, moovBoxes, b'meta')
-  while True:
-    if b'trak' not in workingBoxes: break
-    workingBoxes = listSubBoxes(f, workingBoxes, b'trak')
-    tkhdBox = readSubBox(f, workingBoxes, b'tkhd')
-    print(tkhdBox)
-    T[tkhdBox.track_id] = workingBoxes
-  return T
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def readFtyp(f):
-  f.seek(0)
-  length, type = readBox(f)
-  assert(type == b'ftyp')
-  data = f.read(ftypStruct.size)
-  return ftypNamedType._make(ftypStruct.unpack(data))
-
-def readMvhdBox(f, offset):
-  f.seek(offset)
-  length, type = readBox(f)
-  assert(type == b'mvhd')
-  data = f.read(mvhdSubStruct0.size)
-  mvhd = mvhdNamedTuple._make(mvhdSubStruct0.unpack(data))
-  assert(mvhd.version == 0)
-  # Skip the rest of the contents for now...
-  return mvhd
-
-def readcstr(f):
-  s = ''
-  while len(s) < 32:
-    b = f.read(1)
-    if b is None or b == b'\x00':
-      return s
-    else:
-      s += b.decode()
-
-def readHdlrBox(f, offset):
-  f.seek(offset)
-  length, type = readBox(f)
-  assert(type == b'hdlr')
-  # For now, always assume we have no version/flags.
-  data = f.read(hdlrStruct.size)
-  componentName = readcstr(f)
-  fields = list(hdlrStruct.unpack(data))
-  fields.append(componentName)
-  return hdlrNamedTuple._make(fields)
-
-def readTkhdBox(f, offset):
-  f.seek(offset)
-  length, type = readBox(f)
-  assert(type == b'tkhd')
-  data = f.read(tkhdStruct0.size)
-  return tkhdNamedTuple._make(tkhdStruct0.unpack(data))
+# Specialized functions to read sample table data: struct can't handle variable-length.
 
 def readStscBox(f, offset):
   f.seek(offset)
-  length, type = readBox(f)
-  assert(type == b'stsc')
+  header = readBoxHeader(f)
+  assert(header.type == b'stsc')
   f.read(4)  # skip version/flags
   numberOfBlocks = int.from_bytes(f.read(4), 'big')
   spb = []
   for i in range(numberOfBlocks):
     firstBlock = int.from_bytes(f.read(4), 'big')
     numberOfSamples = int.from_bytes(f.read(4), 'big')
-    sampleDescriptionId = int.from_bytes(f.read(4), 'big')  # What is this for?
+    sampleDescriptionId = int.from_bytes(f.read(4), 'big')  # Unused...
     spb.append((firstBlock, numberOfSamples))
   return spb
 
 def readStszBox(f, offset):
   f.seek(offset)
-  length, type = readBox(f)
-  assert(type == b'stsz')
+  header = readBoxHeader(f)
+  assert(header.type == b'stsz')
   f.read(4)  # skip version/flags
   fixedBlockSize = int.from_bytes(f.read(4), 'big')
   if (fixedBlockSize > 0): return fixedBlockSize
   numberOfSampleSizes = int.from_bytes(f.read(4), 'big')
-  #print('numberOfSampleSizes', numberOfSampleSizes)
   ss = []
   for i in range(numberOfSampleSizes):
     sampleSize = int.from_bytes(f.read(4), 'big')
@@ -265,8 +191,8 @@ def readStszBox(f, offset):
 
 def readCo64Box(f, offset):
   f.seek(offset)
-  length, type = readBox(f)
-  assert(type == b'co64')
+  header = readBoxHeader(f)
+  assert(header.type == b'co64')
   f.read(4)  # skip version/flags
   numberOfBlockOffsets = int.from_bytes(f.read(4), 'big')
   bo = []
@@ -275,45 +201,35 @@ def readCo64Box(f, offset):
     bo.append(blockOffset)
   return bo 
 
-def checkAndReadBoxes(f, offset, expectedType):
-  f.seek(offset)
-  length, type = readBox(f)
-  assert(type == expectedType)
-  return readBoxes(f, offset + boxStruct.size, offset + length)
+################################################################################
+# High-level functions
+################################################################################
 
-def recurseOnTracks(f):
-  boxes = readBoxes(f)
+def listTraks(f):
+  boxes = listBoxes(f)
   assert(b'ftyp' in boxes)
-  T = {}
-  moovBoxes = checkAndReadBoxes(f, boxes[b'moov'][0], b'moov') 
-  metaBoxes = checkAndReadBoxes(f, moovBoxes[b'meta'][0], b'meta') 
-  boxes = metaBoxes
-  while True:
-    if b'trak' not in boxes: break
-    boxes = checkAndReadBoxes(f, boxes[b'trak'][0], b'trak') 
-    tkhdBox = readTkhdBox(f, boxes[b'tkhd'][0]) 
-    #print('TKHD', tkhdBox)
-    T[tkhdBox.track_id] = boxes
-  return T
+  moovBoxes = listSubBoxes(f, boxes, b'moov')
+  return moovBoxes[b'trak']
 
-def processSamples(f, trakBoxes, callback):
-  #print('TRAK BOXES', trakBoxes)
-  tkhdBox = readTkhdBox(f, trakBoxes[b'tkhd'][0]) 
-  #print('TKHD', tkhdBox)
-  mdiaBoxes = checkAndReadBoxes(f, trakBoxes[b'mdia'][0], b'mdia') 
-  #print('MDIA BOXES', mdiaBoxes)
-  hdlrBox = readHdlrBox(f, mdiaBoxes[b'hdlr'][0]) 
-  #print('HDLR', hdlrBox)
-  minfBoxes = checkAndReadBoxes(f, mdiaBoxes[b'minf'][0], b'minf') 
-  #print('MINF BOXES', minfBoxes)
-  stblBoxes = checkAndReadBoxes(f, minfBoxes[b'stbl'][0], b'stbl') 
-  #print('STBL BOXES', stblBoxes)
+def processSamples(f, index, callback):
+  boxes = listBoxes(f)
+  #print('boxes', boxes)
+  moovSubBoxes = listSubBoxes(f, boxes, b'moov')
+  #print('moov sub-boxes', moovSubBoxes)
+  trakSubBoxes = listSubBoxes(f, moovSubBoxes, b'trak', index)
+  #print('trak sub-boxes', trakSubBoxes)
+  mdiaSubBoxes = listSubBoxes(f, trakSubBoxes, b'mdia')
+  #print('mdia sub-boxes', mdiaSubBoxes)
+  minfSubBoxes = listSubBoxes(f, mdiaSubBoxes, b'minf')
+  #print('minf sub-boxes', minfSubBoxes)
+  stblSubBoxes = listSubBoxes(f, minfSubBoxes, b'stbl')
+  #print('stbl sub-boxes', stblSubBoxes)
 
-  blockToSamplesTable = readStscBox(f, stblBoxes[b'stsc'][0]) 
+  blockToSamplesTable = readStscBox(f, stblSubBoxes[b'stsc'][0]) 
   #print('STSC', blockToSamplesTable)
-  sampleSizes = readStszBox(f, stblBoxes[b'stsz'][0]) 
+  sampleSizes = readStszBox(f, stblSubBoxes[b'stsz'][0]) 
   #print('STSZ', sampleSizes)
-  blockOffsets = readCo64Box(f, stblBoxes[b'co64'][0]) 
+  blockOffsets = readCo64Box(f, stblSubBoxes[b'co64'][0]) 
   #print('CO64', blockOffsets)
 
   tableCounter = 0
@@ -331,3 +247,31 @@ def processSamples(f, trakBoxes, callback):
     sample = f.read(sampleSizes[sampleCounter])
     callback(sample)
     sampleInBlockCounter += 1
+
+
+# Tests
+if __name__ == '__main__':
+  filename = 'test_recording.mp4'
+  f = open(filename, 'rb')
+
+  if 1:  # Low-level tests
+    print('===== Low-level tests =====')
+    #
+    boxes = listBoxes(f)
+    print(boxes)
+    
+    #
+    print(readSubBox(f, boxes, b'ftyp'))
+    
+    #
+    moovSubBoxes = listSubBoxes(f, boxes, b'moov')
+    print('moov sub-boxes', moovSubBoxes)
+    for t in range(len(moovSubBoxes[b'trak'])):
+      trakSubBoxes = listSubBoxes(f, moovSubBoxes, b'trak', t)
+      print('trak sub-boxes', trakSubBoxes)
+      tkhdBox = readSubBox(f, trakSubBoxes, b'tkhd')
+      print('tkhd', tkhdBox)
+  
+  if 1:  # High-level tests
+    print('===== High-level tests =====')
+    processSamples(f, 0, print)
