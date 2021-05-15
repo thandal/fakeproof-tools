@@ -1,5 +1,5 @@
 # fakeproof-tools
-Very crude data extraction tool for MP4 files created by the [FakeProof App](https://play.google.com/store/apps/details?id=com.ee.fakeproof).
+Very rudimentary data extraction tool for MP4 files created by the [FakeProof App](https://play.google.com/store/apps/details?id=com.ee.fakeproof).
 
 ## Python tool (preferred)
 ```
