@@ -218,9 +218,90 @@ def readCo64Box(f, offset):
     bo.append(blockOffset)
   return bo 
 
+def readStcoBox(f, offset):
+  # Block (or chunk) offset table (32-bit variant)
+  f.seek(offset)
+  header = readBoxHeader(f)
+  assert(header.type == b'stco')
+  f.read(4)  # skip version/flags
+  numberOfBlockOffsets = int.from_bytes(f.read(4), 'big')
+  bo = []
+  for i in range(numberOfBlockOffsets):
+    blockOffset = int.from_bytes(f.read(4), 'big')
+    bo.append(blockOffset)
+  return bo
+
+# Fragmented MP4 (moof/mdat) parsing
+
+# trun flags
+TRUN_DATA_OFFSET        = 0x000001
+TRUN_FIRST_SAMPLE_FLAGS = 0x000004
+TRUN_SAMPLE_DURATION    = 0x000100
+TRUN_SAMPLE_SIZE        = 0x000200
+TRUN_SAMPLE_FLAGS       = 0x000400
+TRUN_SAMPLE_CTS_OFFSET  = 0x000800
+
+def readMoofSamples(f, moofOffset):
+  """Parse a moof box and return (track_id, base_decode_time, [(size, duration), ...], data_offset).
+  data_offset is absolute file position of the sample data."""
+  moofSubBoxes = listSubBoxes(f, {b'moof': [moofOffset]}, b'moof')
+  trafSubBoxes = listSubBoxes(f, moofSubBoxes, b'traf')
+
+  # tfhd: track ID
+  f.seek(trafSubBoxes[b'tfhd'][0])
+  header = readBoxHeader(f)
+  version_flags = int.from_bytes(f.read(4), 'big')
+  track_id = int.from_bytes(f.read(4), 'big')
+
+  # tfdt: base media decode time
+  f.seek(trafSubBoxes[b'tfdt'][0])
+  header = readBoxHeader(f)
+  version_flags = int.from_bytes(f.read(4), 'big')
+  version = version_flags >> 24
+  if version == 1:
+    base_decode_time = int.from_bytes(f.read(8), 'big')
+  else:
+    base_decode_time = int.from_bytes(f.read(4), 'big')
+
+  # trun: sample table
+  f.seek(trafSubBoxes[b'trun'][0])
+  header = readBoxHeader(f)
+  version_flags = int.from_bytes(f.read(4), 'big')
+  flags = version_flags & 0xFFFFFF
+  sample_count = int.from_bytes(f.read(4), 'big')
+
+  data_offset = 0
+  if flags & TRUN_DATA_OFFSET:
+    data_offset = int.from_bytes(f.read(4), 'big', signed=True)
+  if flags & TRUN_FIRST_SAMPLE_FLAGS:
+    f.read(4)  # skip
+
+  samples = []
+  for i in range(sample_count):
+    duration = 0
+    size = 0
+    if flags & TRUN_SAMPLE_DURATION:
+      duration = int.from_bytes(f.read(4), 'big')
+    if flags & TRUN_SAMPLE_SIZE:
+      size = int.from_bytes(f.read(4), 'big')
+    if flags & TRUN_SAMPLE_FLAGS:
+      f.read(4)  # skip
+    if flags & TRUN_SAMPLE_CTS_OFFSET:
+      f.read(4)  # skip
+    samples.append((size, duration))
+
+  # data_offset is relative to the start of the moof box
+  abs_data_offset = moofOffset + data_offset
+  return track_id, base_decode_time, samples, abs_data_offset
+
 ################################################################################
 # High-level functions
 ################################################################################
+
+def isFragmented(f):
+  """Check if the file uses fragmented MP4 (has moof boxes)."""
+  boxes = listBoxes(f)
+  return b'moof' in boxes
 
 def listTraks(f):
   boxes = listBoxes(f)
@@ -230,50 +311,62 @@ def listTraks(f):
 
 def processSamples(f, index, callback):
   boxes = listBoxes(f)
-  #print('boxes', boxes)
   moovSubBoxes = listSubBoxes(f, boxes, b'moov')
-  #print('moov sub-boxes', moovSubBoxes)
   trakSubBoxes = listSubBoxes(f, moovSubBoxes, b'trak', index)
-  #print('trak sub-boxes', trakSubBoxes)
-  mdiaSubBoxes = listSubBoxes(f, trakSubBoxes, b'mdia')
-  #print('mdia sub-boxes', mdiaSubBoxes)
-  minfSubBoxes = listSubBoxes(f, mdiaSubBoxes, b'minf')
-  #print('minf sub-boxes', minfSubBoxes)
-  stblSubBoxes = listSubBoxes(f, minfSubBoxes, b'stbl')
-  #print('stbl sub-boxes', stblSubBoxes)
 
-  blockToSamplesTable = readStscBox(f, stblSubBoxes[b'stsc'][0]) 
-  #print('STSC', blockToSamplesTable)
-  sampleSizes = readStszBox(f, stblSubBoxes[b'stsz'][0]) 
-  #print('STSZ', sampleSizes)
-  sampleDurations = readSttsBox(f, stblSubBoxes[b'stts'][0]) 
-  #print('STTS', sampleDurations)
-  blockOffsets = readCo64Box(f, stblSubBoxes[b'co64'][0]) 
-  #print('CO64', blockOffsets)
+  # Get the track ID for this index
+  tkhdBox = readSubBox(f, trakSubBoxes, b'tkhd')
+  track_id = tkhdBox.track_id
 
-  tableCounter = 0
-  blockInTableCounter = 0
-  sampleInBlockCounter = 0
-  sampleInDurationCounter = 0
-  durationCounter = 0
-  blockCounter = 0
-  f.seek(blockOffsets[blockCounter])
-  time = 0
-  for sampleCounter in range(len(sampleSizes)):
-    if sampleInDurationCounter >= sampleDurations[durationCounter][0]:
-      durationCounter += 1
-      sampleInDurationCounter = 0
-    if sampleInBlockCounter >= blockToSamplesTable[tableCounter][1]:
-      blockCounter += 1
-      sampleInBlockCounter = 0
-      if blockCounter + 1 >= blockToSamplesTable[tableCounter + 1][0]:
-        tableCounter += 1
-      f.seek(blockOffsets[blockCounter])
-    sample = f.read(sampleSizes[sampleCounter])
-    callback(time, sample)
-    sampleInBlockCounter += 1
-    sampleInDurationCounter += 1
-    time += sampleDurations[durationCounter][1]
+  if b'moof' in boxes:
+    # Fragmented MP4: samples are in moof/mdat pairs
+    for moofOffset in boxes[b'moof']:
+      moof_track_id, base_decode_time, samples, data_offset = readMoofSamples(f, moofOffset)
+      if moof_track_id != track_id:
+        continue
+      f.seek(data_offset)
+      time = base_decode_time
+      for size, duration in samples:
+        sample = f.read(size)
+        callback(time, sample)
+        time += duration
+  else:
+    # Non-fragmented MP4: samples are in stbl tables
+    mdiaSubBoxes = listSubBoxes(f, trakSubBoxes, b'mdia')
+    minfSubBoxes = listSubBoxes(f, mdiaSubBoxes, b'minf')
+    stblSubBoxes = listSubBoxes(f, minfSubBoxes, b'stbl')
+
+    blockToSamplesTable = readStscBox(f, stblSubBoxes[b'stsc'][0])
+    sampleSizes = readStszBox(f, stblSubBoxes[b'stsz'][0])
+    sampleDurations = readSttsBox(f, stblSubBoxes[b'stts'][0])
+    if b'co64' in stblSubBoxes:
+      blockOffsets = readCo64Box(f, stblSubBoxes[b'co64'][0])
+    else:
+      blockOffsets = readStcoBox(f, stblSubBoxes[b'stco'][0])
+
+    tableCounter = 0
+    blockInTableCounter = 0
+    sampleInBlockCounter = 0
+    sampleInDurationCounter = 0
+    durationCounter = 0
+    blockCounter = 0
+    f.seek(blockOffsets[blockCounter])
+    time = 0
+    for sampleCounter in range(len(sampleSizes)):
+      if sampleInDurationCounter >= sampleDurations[durationCounter][0]:
+        durationCounter += 1
+        sampleInDurationCounter = 0
+      if sampleInBlockCounter >= blockToSamplesTable[tableCounter][1]:
+        blockCounter += 1
+        sampleInBlockCounter = 0
+        if blockCounter + 1 >= blockToSamplesTable[tableCounter + 1][0]:
+          tableCounter += 1
+        f.seek(blockOffsets[blockCounter])
+      sample = f.read(sampleSizes[sampleCounter])
+      callback(time, sample)
+      sampleInBlockCounter += 1
+      sampleInDurationCounter += 1
+      time += sampleDurations[durationCounter][1]
 
 
 # Tests
